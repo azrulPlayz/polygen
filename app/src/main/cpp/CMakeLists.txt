@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.18)
+project(polygen)
+add_library(polygen SHARED native-lib.cpp)
+find_library(GLES GLESv3)
+find_library(LOG log)
+target_link_libraries(polygen ${GLES} ${LOG})
