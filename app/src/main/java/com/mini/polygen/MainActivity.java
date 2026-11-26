@@ -40,7 +40,7 @@ public class MainActivity extends Activity {
     private LinearLayout outlinerList, propsBox, propsRows, editGroup;
     private ScrollView outlinerScroll, propsScroll;
     private FrameLayout tabContent;
-    private Button tabOutliner, tabProps, modeObj, modeEdit, btnVtx, btnFace;
+    private Button btnUndo, btnRedo, tabOutliner, tabProps, modeObj, modeEdit, btnVtx, btnFace;
     private TextView propsTitle, propsHint;
     private final Button[] toolBtns = new Button[4], axisBtns = new Button[4];
     private final EditText[] fields = new EditText[9];
@@ -97,7 +97,7 @@ public class MainActivity extends Activity {
 
         FrameLayout vp = new FrameLayout(this);
         vp.addView(gl, new FrameLayout.LayoutParams(MATCH, MATCH));
-        FrameLayout.LayoutParams tp = new FrameLayout.LayoutParams(dp(60), WRAP, Gravity.START | Gravity.TOP);
+        FrameLayout.LayoutParams tp = new FrameLayout.LayoutParams(dp(80), WRAP, Gravity.START | Gravity.TOP);
         tp.setMargins(dp(4), dp(4), 0, dp(4));
         vp.addView(buildToolColumn(), tp);
         root.addView(vp, new LinearLayout.LayoutParams(MATCH, 0, 1f));
@@ -147,8 +147,12 @@ public class MainActivity extends Activity {
             m.setOnMenuItemClickListener(i -> { NativeLib.addObj(i.getItemId()); sync(); return true; });
             m.show();
         });
+        btnUndo = chip("\u21B6", v -> { NativeLib.action(2); sync(); });
+        btnRedo = chip("\u21B7", v -> { NativeLib.action(3); sync(); });
         top.addView(file, margin(WRAP, WRAP, 0f, 2));
         top.addView(add, margin(WRAP, WRAP, 0f, 2));
+        top.addView(btnUndo, margin(WRAP, WRAP, 0f, 2));
+        top.addView(btnRedo, margin(WRAP, WRAP, 0f, 2));
         top.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
         modeObj = chip("Objek", v -> { NativeLib.set(3, 0); sync(); });
         modeEdit = chip("Edit", v -> { NativeLib.set(3, 1); sync(); });
@@ -188,6 +192,8 @@ public class MainActivity extends Activity {
         editGroup.addView(btnFace, margin(MATCH, WRAP, 0f, 2));
         editGroup.addView(ext, margin(MATCH, WRAP, 0f, 2));
         col.addView(editGroup, new LinearLayout.LayoutParams(MATCH, WRAP));
+        Button dup = chip("Duplikat", v -> { NativeLib.action(4); sync(); });
+        col.addView(dup, margin(MATCH, WRAP, 0f, 2));
         Button del = chip("Hapus", v -> { NativeLib.action(1); sync(); });
         col.addView(del, margin(MATCH, WRAP, 0f, 2));
         return sv;
@@ -244,6 +250,7 @@ public class MainActivity extends Activity {
         propsRows.addView(propRow("Posisi", 0));
         propsRows.addView(propRow("Rotasi", 3));
         propsRows.addView(propRow("Ukuran", 6));
+        propsRows.addView(label("Tip: geser angka ke kiri/kanan untuk mengecilkan/membesarkan, tap untuk mengetik.", 11, DIM));
 
         propsBox.addView(propsTitle);
         propsBox.addView(propsHint);
@@ -256,14 +263,14 @@ public class MainActivity extends Activity {
         r.setGravity(Gravity.CENTER_VERTICAL);
         r.addView(label(name, 12, DIM), new LinearLayout.LayoutParams(dp(56), WRAP));
         for (int k = 0; k < 3; k++) {
-            EditText e = makeField();
+            EditText e = makeField(start + k);
             fields[start + k] = e;
             r.addView(e, margin(0, WRAP, 1f, 2));
         }
         return r;
     }
 
-    private EditText makeField() {
+    private EditText makeField(final int idx) {
         EditText e = new EditText(this);
         e.setSingleLine(true);
         e.setTextSize(13);
@@ -280,6 +287,39 @@ public class MainActivity extends Activity {
             return true;
         });
         e.setOnFocusChangeListener((v, has) -> { if (!has) applyProps(); });
+        // geser kiri/kanan di angka = ubah nilai (tap biasa tetap membuka keyboard)
+        final float slop = dp(8);
+        final float step = (idx >= 3 && idx < 6) ? 0.5f : 0.01f;  // per piksel: rotasi 0.5 derajat, lainnya 0.01
+        final float[] st = new float[3];  // downX, downY, startValue
+        final boolean[] scrubbing = {false};
+        e.setOnTouchListener((v, ev) -> {
+            switch (ev.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    st[0] = ev.getRawX(); st[1] = ev.getRawY();
+                    scrubbing[0] = false;
+                    try { st[2] = Float.parseFloat(((EditText) v).getText().toString().trim()); }
+                    catch (NumberFormatException x) { st[2] = 0f; }
+                    return false;
+                case MotionEvent.ACTION_MOVE:
+                    if (v.hasFocus() && !scrubbing[0]) return false;  // sedang mengetik: biarkan kursor
+                    float dx = ev.getRawX() - st[0];
+                    if (!scrubbing[0]) {
+                        if (Math.abs(dx) < slop || Math.abs(dx) < Math.abs(ev.getRawY() - st[1])) return false;
+                        scrubbing[0] = true;
+                        v.getParent().requestDisallowInterceptTouchEvent(true);
+                        NativeLib.action(7);
+                        v.cancelLongPress();
+                    }
+                    scrub(idx, st[2] + dx * step);
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    if (scrubbing[0]) { scrubbing[0] = false; NativeLib.action(7); return true; }
+                    return false;
+                default:
+                    return scrubbing[0];
+            }
+        });
         return e;
     }
 
@@ -351,6 +391,9 @@ public class MainActivity extends Activity {
         active(btnVtx, s[1] == 0);
         active(btnFace, s[1] == 1);
         editGroup.setVisibility(s[0] == 1 ? View.VISIBLE : View.GONE);
+        boolean cu = s.length >= 7 && s[5] == 1, cr = s.length >= 7 && s[6] == 1;
+        btnUndo.setEnabled(cu); btnUndo.setAlpha(cu ? 1f : 0.35f);
+        btnRedo.setEnabled(cr); btnRedo.setAlpha(cr ? 1f : 0.35f);
     }
 
     private void refreshOutliner() {
@@ -372,7 +415,7 @@ public class MainActivity extends Activity {
             TextView name = label(NativeLib.objName(i), 14, vis ? TXT : DIM);
             name.setPadding(dp(2), dp(10), dp(2), dp(10));
             name.setOnClickListener(v -> { NativeLib.selectObj(idx); sync(); });
-            name.setOnLongClickListener(v -> { rename(idx); return true; });
+            name.setOnLongClickListener(v -> { contextMenu(idx); return true; });
             r.addView(name, new LinearLayout.LayoutParams(0, WRAP, 1f));
 
             TextView eye = label(vis ? "\u25C9" : "\u25CB", 18, vis ? TXT : DIM);
@@ -407,6 +450,19 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void scrub(int idx, float value) {
+        int sel = NativeLib.selected();
+        if (sel < 0) return;
+        float[] t = NativeLib.getTransform(sel);
+        if (t == null || t.length < 9) return;
+        t[idx] = value;
+        NativeLib.setTransform(sel, t);
+        float[] n = NativeLib.getTransform(sel);  // nilai setelah dibatasi mesin (ukuran min 0.01)
+        String s = String.format(Locale.US, "%.2f", n[idx]);
+        shown[idx] = s;
+        fields[idx].setText(s);
+    }
+
     private void applyProps() {
         int sel = NativeLib.selected();
         if (sel < 0) return;
@@ -422,7 +478,39 @@ public class MainActivity extends Activity {
                 changed = true;
             } catch (NumberFormatException ignored) { }
         }
-        if (changed) NativeLib.setTransform(sel, t);
+        if (changed) { NativeLib.action(7); NativeLib.setTransform(sel, t); }
+    }
+
+    private void contextMenu(final int i) {
+        NativeLib.selectObj(i);
+        final boolean vis = NativeLib.objVisible(i);
+        int[] st = NativeLib.state();
+        final boolean canPaste = st != null && st.length >= 8 && st[7] == 1;
+        final String[] items = {"Salin", canPaste ? "Tempel" : "Tempel (kosong)", "Duplikat", "Ganti nama",
+                "Warna\u2026", vis ? "Sembunyikan" : "Tampilkan", "Hapus"};
+        new AlertDialog.Builder(this)
+                .setTitle(NativeLib.objName(i))
+                .setItems(items, (d, w) -> {
+                    switch (w) {
+                        case 0: NativeLib.action(5); break;
+                        case 1: NativeLib.action(6); break;
+                        case 2: NativeLib.action(4); break;
+                        case 3: rename(i); break;
+                        case 4: pickColor(); break;
+                        case 5: NativeLib.setVisible(i, !vis); break;
+                        default: NativeLib.deleteObj(i);
+                    }
+                    sync();
+                })
+                .show();
+    }
+
+    private void pickColor() {
+        final String[] names = {"Abu-abu (bawaan)", "Merah", "Oranye", "Kuning", "Hijau", "Biru", "Ungu", "Pink"};
+        new AlertDialog.Builder(this)
+                .setTitle("Warna objek")
+                .setItems(names, (d, w) -> { NativeLib.action(10 + w); sync(); })
+                .show();
     }
 
     private void rename(final int i) {

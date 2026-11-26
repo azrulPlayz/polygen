@@ -106,7 +106,7 @@ public final class NativeLib {
 
     // status
     public static native int version();      // naik setiap ada perubahan
-    public static native int[] state();      // {mode, selMode, tool, axis, selected}
+    public static native int[] state();      // {mode, selMode, tool, axis, selected, canUndo, canRedo, canPaste}
 
     // objek
     public static native int objCount();
@@ -127,7 +127,8 @@ public final class NativeLib {
     /** kind: 0 seleksi edit (0 vertex, 1 face), 1 tool (0 kamera, 1 geser, 2 ukuran, 3 putar),
      *  2 sumbu (0 X, 1 Y, 2 Z, 3 N), 3 mode (0 objek, 1 edit) */
     public static native void set(int kind, int value);
-    /** code: 0 extrude, 1 hapus pilihan */
+    /** code: 0 extrude, 1 hapus pilihan, 2 undo, 3 redo, 4 duplikat, 5 salin, 6 tempel,
+     *  7 mulai gestur edit baru (gabung undo), 10..17 warna objek (0 abu bawaan) */
     public static native void action(int code);
     public static native boolean exportObj(String path);
 }
