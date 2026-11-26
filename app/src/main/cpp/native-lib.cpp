@@ -62,6 +62,7 @@ struct Obj {
     V3 pos{0, 0, 0}, rot{0, 0, 0}, size{1, 1, 1};  // rot dalam derajat (XYZ)
     bool visible = true;
     V3 color{0.72f, 0.74f, 0.78f};
+    bool colored = false;  // warna dipilih user
 };
 
 static std::mutex M;
@@ -84,6 +85,84 @@ static GLuint prog;
 static GLint uMvp, uLit, uPt;
 
 static void bump() { stateVer++; dirty = true; }
+static Obj* cur();
+
+// ---------- undo / redo (snapshot seluruh scene) ----------
+struct Snap { vector<Obj> objs; int curObj; int nameCount[2]; };
+static vector<Snap> undoS, redoS;
+static bool dragPushed = false;  // satu drag = satu langkah undo
+static const size_t MAX_HIST = 60;
+
+static Snap takeSnap() {
+    Snap s;
+    s.objs = objs; s.curObj = curObj;
+    s.nameCount[0] = nameCount[0]; s.nameCount[1] = nameCount[1];
+    return s;
+}
+static void pushUndo() {  // panggil SEBELUM mengubah scene
+    undoS.push_back(takeSnap());
+    if (undoS.size() > MAX_HIST) undoS.erase(undoS.begin());
+    redoS.clear();
+}
+static void beginDragEdit() { if (!dragPushed) { pushUndo(); dragPushed = true; } }
+static void applySnap(Snap& s) {
+    objs = std::move(s.objs); curObj = s.curObj;
+    nameCount[0] = s.nameCount[0]; nameCount[1] = s.nameCount[1];
+    selV = selF = -1;
+    if (curObj < 0 || curObj >= (int)objs.size()) { curObj = -1; mode = 0; }
+    bump();
+}
+static void doUndo() {
+    if (undoS.empty()) return;
+    redoS.push_back(takeSnap());
+    Snap s = std::move(undoS.back()); undoS.pop_back();
+    applySnap(s);
+}
+static void doRedo() {
+    if (redoS.empty()) return;
+    undoS.push_back(takeSnap());
+    Snap s = std::move(redoS.back()); redoS.pop_back();
+    applySnap(s);
+}
+static void duplicateObj() {
+    Obj* o = cur();
+    if (!o) return;
+    pushUndo();
+    Obj c = *o;
+    c.name += " copy";
+    c.pos = c.pos + V3{0.5f, 0, 0.5f};
+    objs.push_back(c);
+    curObj = (int)objs.size() - 1;
+    mode = 0;
+    selV = selF = -1;
+    bump();
+}
+
+static Obj clipObj;
+static bool hasClip = false;
+static void copyObj() { Obj* o = cur(); if (o) { clipObj = *o; hasClip = true; bump(); } }
+static void pasteObj() {
+    if (!hasClip) return;
+    pushUndo();
+    Obj c = clipObj;
+    c.pos = c.pos + V3{0.5f, 0, 0.5f};
+    objs.push_back(c);
+    curObj = (int)objs.size() - 1;
+    mode = 0;
+    selV = selF = -1;
+    bump();
+}
+static const float PALETTE[8][3] = {{0.72f,0.74f,0.78f},{0.90f,0.30f,0.30f},{0.95f,0.60f,0.20f},{0.95f,0.85f,0.30f},
+                                    {0.35f,0.80f,0.40f},{0.30f,0.55f,0.95f},{0.65f,0.40f,0.90f},{0.95f,0.50f,0.75f}};
+static void setColorIdx(int k) {
+    Obj* o = cur();
+    if (!o || k < 0 || k > 7) return;
+    pushUndo();
+    o->color = {PALETTE[k][0], PALETTE[k][1], PALETTE[k][2]};
+    o->colored = (k != 0);
+    bump();
+}
+
 static Obj* cur() { return (curObj >= 0 && curObj < (int)objs.size()) ? &objs[curObj] : nullptr; }
 
 static V3 toWorld(const Obj& o, V3 p) {
@@ -195,6 +274,7 @@ static void addObjInternal(int type) {
 static void extrudeFace() {
     Obj* o = cur();
     if (!o || mode != 1 || selMode != 1 || selF < 0 || selF >= (int)o->faces.size()) return;
+    pushUndo();
     vector<int> f = o->faces[selF];
     V3 n = faceNv(o->verts, f);
     vector<int> nf;
@@ -208,6 +288,7 @@ static void extrudeFace() {
 
 static void deleteObjAt(int i) {
     if (i < 0 || i >= (int)objs.size()) return;
+    pushUndo();
     objs.erase(objs.begin() + i);
     if (curObj == i) curObj = -1;
     else if (curObj > i) curObj--;
@@ -221,9 +302,11 @@ static void deleteSel() {
     Obj* o = cur();
     if (!o) return;
     if (selMode == 1 && selF >= 0 && selF < (int)o->faces.size()) {
+        pushUndo();
         o->faces.erase(o->faces.begin() + selF);
         selF = -1;
     } else if (selMode == 0 && selV >= 0) {
+        pushUndo();
         int v = selV;
         o->faces.erase(std::remove_if(o->faces.begin(), o->faces.end(), [v](const vector<int>& f) {
             return std::find(f.begin(), f.end(), v) != f.end();
@@ -239,6 +322,7 @@ static void grab(float dx, float dy) {
     if (!o) return;
     if (mode == 0 && tool == 3) {  // putar
         float a = dx * 0.5f;
+        beginDragEdit();
         if (axisI == 0) o->rot.x += a;
         else if (axisI == 2) o->rot.z += a;
         else o->rot.y += a;
@@ -247,6 +331,7 @@ static void grab(float dx, float dy) {
     }
     if (mode == 0 && tool == 2 && axisI == 3) {  // ukuran seragam
         float s = 1.f + (dx - dy) * 0.005f;
+        beginDragEdit();
         o->size = {std::max(0.01f, o->size.x * s), std::max(0.01f, o->size.y * s), std::max(0.01f, o->size.z * s)};
         bump();
         return;
@@ -259,6 +344,7 @@ static void grab(float dx, float dy) {
     float ax = x1 - x0, ay = y1 - y0, l2 = ax * ax + ay * ay;
     if (l2 < 4.f) return;  // sumbu menghadap kamera
     float t = (dx * ax + dy * ay) / l2;
+    beginDragEdit();
     if (mode == 0) {
         if (tool == 1) o->pos = o->pos + d * t;
         else if (tool == 2) {
@@ -441,7 +527,7 @@ static void rebuild() {
         const Obj& o = objs[oi];
         if (!o.visible) continue;
         bool selO = (oi == curObj);
-        V3 base = (selO && mode == 0) ? V3{0.55f, 0.72f, 1.f} : o.color;
+        V3 base = (selO && mode == 0 && !o.colored) ? V3{0.55f, 0.72f, 1.f} : o.color;
         V3 ec = (selO && mode == 0) ? orange : V3{0.05f, 0.05f, 0.07f};
         for (int i = 0; i < (int)o.faces.size(); i++) {
             const vector<int>& f = o.faces[i];
@@ -543,7 +629,7 @@ JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_touch(JNIEnv*, jclass, ji
     static float lx, ly, sx, sy, pd;
     static bool moved;
     switch (act) {
-        case 0: lx = sx = x; ly = sy = y; moved = false; break;
+        case 0: lx = sx = x; ly = sy = y; moved = false; dragPushed = false; break;
         case 5: pd = hypotf(x2 - x, y2 - y); moved = true; break;
         case 6: lx = x; ly = y; break;
         case 2:
@@ -565,6 +651,7 @@ JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_touch(JNIEnv*, jclass, ji
             }
             break;
         case 1:
+            dragPushed = false;
             if (!moved) { if (mode == 0) pickObject(x, y); else pickElement(x, y); }
             break;
         default: break;
@@ -578,9 +665,9 @@ JNIEXPORT jint JNICALL Java_com_mini_polygen_NativeLib_version(JNIEnv*, jclass) 
 
 JNIEXPORT jintArray JNICALL Java_com_mini_polygen_NativeLib_state(JNIEnv* env, jclass) {
     std::lock_guard<std::mutex> lk(M);
-    jint s[5] = {mode, selMode, tool, axisI, curObj};
-    jintArray a = env->NewIntArray(5);
-    env->SetIntArrayRegion(a, 0, 5, s);
+    jint s[8] = {mode, selMode, tool, axisI, curObj, undoS.empty() ? 0 : 1, redoS.empty() ? 0 : 1, hasClip ? 1 : 0};
+    jintArray a = env->NewIntArray(8);
+    env->SetIntArrayRegion(a, 0, 8, s);
     return a;
 }
 
@@ -615,6 +702,7 @@ JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_selectObj(JNIEnv*, jclass
 JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_setVisible(JNIEnv*, jclass, jint i, jboolean v) {
     std::lock_guard<std::mutex> lk(M);
     if (i < 0 || i >= (int)objs.size()) return;
+    pushUndo();
     objs[i].visible = (v == JNI_TRUE);
     bump();
 }
@@ -630,7 +718,7 @@ JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_renameObj(JNIEnv* env, jc
     const char* c = env->GetStringUTFChars(s, nullptr);
     string n = c ? c : "";
     env->ReleaseStringUTFChars(s, c);
-    if (!n.empty()) objs[i].name = n;
+    if (!n.empty() && n != objs[i].name) { pushUndo(); objs[i].name = n; }
     bump();
 }
 
@@ -652,6 +740,7 @@ JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_setTransform(JNIEnv* env,
     if (i < 0 || i >= (int)objs.size()) return;
     float t[9];
     env->GetFloatArrayRegion(arr, 0, 9, t);
+    beginDragEdit();  // scrub angka = satu langkah undo; Java memanggil action(7) untuk memulai langkah baru
     Obj& o = objs[i];
     o.pos = {t[0], t[1], t[2]};
     o.rot = {t[3], t[4], t[5]};
@@ -661,6 +750,7 @@ JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_setTransform(JNIEnv* env,
 
 JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_addObj(JNIEnv*, jclass, jint type) {
     std::lock_guard<std::mutex> lk(M);
+    pushUndo();
     addObjInternal(type);
 }
 
@@ -681,6 +771,13 @@ JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_action(JNIEnv*, jclass, j
     std::lock_guard<std::mutex> lk(M);
     if (code == 0) extrudeFace();
     else if (code == 1) deleteSel();
+    else if (code == 2) doUndo();
+    else if (code == 3) doRedo();
+    else if (code == 4) duplicateObj();
+    else if (code == 5) copyObj();
+    else if (code == 6) pasteObj();
+    else if (code == 7) dragPushed = false;  // akhiri/mulai gestur edit (untuk menggabung undo)
+    else if (code >= 10 && code <= 17) setColorIdx(code - 10);
 }
 
 JNIEXPORT jboolean JNICALL Java_com_mini_polygen_NativeLib_exportObj(JNIEnv* env, jclass, jstring path) {
