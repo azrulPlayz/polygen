@@ -1,29 +1,71 @@
 package com.mini.polygen;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Context;
+import android.content.Intent;
 import android.opengl.GLSurfaceView;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.InputType;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
+import android.widget.ScrollView;
+import android.widget.TextView;
 import android.widget.Toast;
+
+import java.io.InputStream;
+import java.util.Locale;
 
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
 public class MainActivity extends Activity {
+    private static final int BG = 0xFF1B1E23, PANEL = 0xFF262A31, BTN = 0xFF343942, ACC = 0xFF3E90FF,
+            TXT = 0xFFE6E8EB, DIM = 0xFF8A9099, ROWSEL = 0xFF2F4F7F;
+    private static final int MATCH = ViewGroup.LayoutParams.MATCH_PARENT, WRAP = ViewGroup.LayoutParams.WRAP_CONTENT;
+
     private GLSurfaceView gl;
+    private View rootView;
+    private LinearLayout outlinerList, propsBox, propsRows, editGroup;
+    private ScrollView outlinerScroll, propsScroll;
+    private FrameLayout tabContent;
+    private Button tabOutliner, tabProps, modeObj, modeEdit, btnVtx, btnFace;
+    private TextView propsTitle, propsHint;
+    private final Button[] toolBtns = new Button[4], axisBtns = new Button[4];
+    private final EditText[] fields = new EditText[9];
+    private final String[] shown = new String[9];
+    private int tab = 0;
+    private boolean collapsed = false;
+    private int lastVer = -1;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable poll = new Runnable() {
+        @Override public void run() {
+            if (NativeLib.version() != lastVer) sync();
+            handler.postDelayed(this, 150);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        NativeLib.load(this);  // harus pertama: pakai .so pengganti kalau ada
 
         gl = new GLSurfaceView(this) {
             @Override
             public boolean onTouchEvent(MotionEvent e) {
-                final int a = e.getActionMasked();
+                int a = e.getActionMasked();
+                if (a == MotionEvent.ACTION_DOWN) { rootView.requestFocus(); hideKeyboard(this); }
                 int n = e.getPointerCount();
                 float px = e.getX(0), py = e.getY(0);
                 float qx = n > 1 ? e.getX(1) : 0, qy = n > 1 ? e.getY(1) : 0;
@@ -33,9 +75,7 @@ public class MainActivity extends Activity {
                     py = e.getY(keep);
                     n = 1;
                 }
-                final float x = px, y = py, x2 = qx, y2 = qy;
-                final int cnt = n;
-                queueEvent(() -> NativeLib.touch(a, x, y, x2, y2, cnt));
+                NativeLib.touch(a, px, py, qx, qy, n);
                 return true;
             }
         };
@@ -46,65 +86,396 @@ public class MainActivity extends Activity {
             @Override public void onDrawFrame(GL10 g) { NativeLib.draw(); }
         });
 
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.VERTICAL);
-        bar.setBackgroundColor(0xCC202428);
-
-        LinearLayout r1 = row(), r2 = row();
-        r1.addView(btn("Kubus", () -> NativeLib.add(0)));
-        r1.addView(btn("Bidang", () -> NativeLib.add(1)));
-        r1.addView(btn("Vertex", () -> NativeLib.set(0, 0)));
-        r1.addView(btn("Face", () -> NativeLib.set(0, 1)));
-        r1.addView(btn("Extrude", () -> NativeLib.action(0)));
-        r1.addView(btn("Hapus", () -> NativeLib.action(1)));
-        r1.addView(btn("Simpan OBJ", this::export));
-        r2.addView(btn("Orbit", () -> NativeLib.set(1, 0)));
-        r2.addView(btn("Geser", () -> NativeLib.set(1, 1)));
-        r2.addView(btn("X", () -> NativeLib.set(2, 0)));
-        r2.addView(btn("Y", () -> NativeLib.set(2, 1)));
-        r2.addView(btn("Z", () -> NativeLib.set(2, 2)));
-        r2.addView(btn("Normal", () -> NativeLib.set(2, 3)));
-        bar.addView(r1);
-        bar.addView(r2);
-
-        FrameLayout root = new FrameLayout(this);
+        LinearLayout root = new LinearLayout(this);
+        rootView = root;
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(BG);
         root.setFitsSystemWindows(true);
-        root.addView(gl);
-        root.addView(bar, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM));
+        root.setFocusableInTouchMode(true);
+
+        root.addView(buildTopBar(), new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        FrameLayout vp = new FrameLayout(this);
+        vp.addView(gl, new FrameLayout.LayoutParams(MATCH, MATCH));
+        FrameLayout.LayoutParams tp = new FrameLayout.LayoutParams(dp(60), WRAP, Gravity.START | Gravity.TOP);
+        tp.setMargins(dp(4), dp(4), 0, dp(4));
+        vp.addView(buildToolColumn(), tp);
+        root.addView(vp, new LinearLayout.LayoutParams(MATCH, 0, 1f));
+
+        root.addView(buildBottomPanel(), new LinearLayout.LayoutParams(MATCH, WRAP));
         setContentView(root);
+        pickTab(0);
+        pickTab(0); // dua kali: buka lagi setelah toggle pertama
     }
 
-    private LinearLayout row() {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(LinearLayout.HORIZONTAL);
-        return l;
+    // ---------- bangun UI ----------
+    private LinearLayout buildTopBar() {
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setBackgroundColor(PANEL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        top.setPadding(dp(4), dp(4), dp(4), dp(4));
+
+        Button file = chip("File \u25BE", v -> {
+            PopupMenu m = new PopupMenu(this, v);
+            m.getMenu().add(0, 0, 0, "Simpan OBJ");
+            m.getMenu().add(0, 1, 1, "Muat .so baru\u2026");
+            m.getMenu().add(0, 2, 2, "Reset .so ke bawaan");
+            m.getMenu().add(0, 3, 3, "Info .so");
+            m.setOnMenuItemClickListener(i -> {
+                switch (i.getItemId()) {
+                    case 0: export(); break;
+                    case 1: pickSo(); break;
+                    case 2:
+                        Toast.makeText(this, NativeLib.resetOverride(this)
+                                ? "Dihapus. Tutup lalu buka ulang aplikasi."
+                                : "Tidak ada .so pengganti", Toast.LENGTH_LONG).show();
+                        break;
+                    default:
+                        Toast.makeText(this, "Sedang memakai: " + (NativeLib.usingOverride() ? ".so pengganti" : ".so bawaan APK")
+                                + (NativeLib.hasOverride(this) ? " (ada file pengganti tersimpan)" : ""),
+                                Toast.LENGTH_LONG).show();
+                }
+                return true;
+            });
+            m.show();
+        });
+        Button add = chip("Tambah \u25BE", v -> {
+            PopupMenu m = new PopupMenu(this, v);
+            m.getMenu().add(0, 0, 0, "Kubus");
+            m.getMenu().add(0, 1, 1, "Bidang");
+            m.setOnMenuItemClickListener(i -> { NativeLib.addObj(i.getItemId()); sync(); return true; });
+            m.show();
+        });
+        top.addView(file, margin(WRAP, WRAP, 0f, 2));
+        top.addView(add, margin(WRAP, WRAP, 0f, 2));
+        top.addView(new View(this), new LinearLayout.LayoutParams(0, 1, 1f));
+        modeObj = chip("Objek", v -> { NativeLib.set(3, 0); sync(); });
+        modeEdit = chip("Edit", v -> { NativeLib.set(3, 1); sync(); });
+        top.addView(modeObj, margin(WRAP, WRAP, 0f, 2));
+        top.addView(modeEdit, margin(WRAP, WRAP, 0f, 2));
+        return top;
     }
 
-    private Button btn(String text, Runnable r) {
+    private View buildToolColumn() {
+        ScrollView sv = new ScrollView(this);
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setBackgroundColor(0x99262A31);
+        col.setPadding(dp(2), dp(2), dp(2), dp(2));
+        sv.addView(col);
+
+        String[] tn = {"Kamera", "Geser", "Ukuran", "Putar"};
+        for (int i = 0; i < 4; i++) {
+            final int idx = i;
+            toolBtns[i] = chip(tn[i], v -> { NativeLib.set(1, idx); sync(); });
+            col.addView(toolBtns[i], margin(MATCH, WRAP, 0f, 2));
+        }
+        col.addView(label("Sumbu", 10, DIM));
+        String[] an = {"X", "Y", "Z", "N"};
+        for (int i = 0; i < 4; i++) {
+            final int idx = i;
+            axisBtns[i] = chip(an[i], v -> { NativeLib.set(2, idx); sync(); });
+            col.addView(axisBtns[i], margin(MATCH, WRAP, 0f, 2));
+        }
+        editGroup = new LinearLayout(this);
+        editGroup.setOrientation(LinearLayout.VERTICAL);
+        editGroup.addView(label("Edit", 10, DIM));
+        btnVtx = chip("Vertex", v -> { NativeLib.set(0, 0); sync(); });
+        btnFace = chip("Face", v -> { NativeLib.set(0, 1); sync(); });
+        Button ext = chip("Extrude", v -> { NativeLib.action(0); sync(); });
+        editGroup.addView(btnVtx, margin(MATCH, WRAP, 0f, 2));
+        editGroup.addView(btnFace, margin(MATCH, WRAP, 0f, 2));
+        editGroup.addView(ext, margin(MATCH, WRAP, 0f, 2));
+        col.addView(editGroup, new LinearLayout.LayoutParams(MATCH, WRAP));
+        Button del = chip("Hapus", v -> { NativeLib.action(1); sync(); });
+        col.addView(del, margin(MATCH, WRAP, 0f, 2));
+        return sv;
+    }
+
+    private LinearLayout buildBottomPanel() {
+        LinearLayout bottom = new LinearLayout(this);
+        bottom.setOrientation(LinearLayout.VERTICAL);
+        bottom.setBackgroundColor(PANEL);
+
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setOrientation(LinearLayout.HORIZONTAL);
+        tabs.setPadding(dp(4), dp(4), dp(4), dp(2));
+        tabOutliner = chip("Outliner", v -> pickTab(0));
+        tabProps = chip("Properti", v -> pickTab(1));
+        tabs.addView(tabOutliner, margin(0, WRAP, 1f, 2));
+        tabs.addView(tabProps, margin(0, WRAP, 1f, 2));
+        bottom.addView(tabs, new LinearLayout.LayoutParams(MATCH, WRAP));
+
+        tabContent = new FrameLayout(this);
+        outlinerScroll = new ScrollView(this);
+        outlinerList = new LinearLayout(this);
+        outlinerList.setOrientation(LinearLayout.VERTICAL);
+        outlinerScroll.addView(outlinerList, new ViewGroup.LayoutParams(MATCH, WRAP));
+
+        propsScroll = new ScrollView(this);
+        propsBox = new LinearLayout(this);
+        propsBox.setOrientation(LinearLayout.VERTICAL);
+        propsBox.setPadding(dp(8), dp(4), dp(8), dp(8));
+        propsScroll.addView(propsBox, new ViewGroup.LayoutParams(MATCH, WRAP));
+        buildProps();
+
+        tabContent.addView(outlinerScroll, new FrameLayout.LayoutParams(MATCH, MATCH));
+        tabContent.addView(propsScroll, new FrameLayout.LayoutParams(MATCH, MATCH));
+        bottom.addView(tabContent, new LinearLayout.LayoutParams(MATCH, dp(190)));
+        return bottom;
+    }
+
+    private void buildProps() {
+        propsTitle = label("", 15, TXT);
+        propsHint = label("Belum ada objek terpilih. Tap objek di viewport atau di outliner.", 13, DIM);
+        propsRows = new LinearLayout(this);
+        propsRows.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.addView(new View(this), new LinearLayout.LayoutParams(dp(56), 1));
+        for (String s : new String[]{"X", "Y", "Z"}) {
+            TextView t = label(s, 12, DIM);
+            t.setGravity(Gravity.CENTER);
+            head.addView(t, new LinearLayout.LayoutParams(0, WRAP, 1f));
+        }
+        propsRows.addView(head);
+        propsRows.addView(propRow("Posisi", 0));
+        propsRows.addView(propRow("Rotasi", 3));
+        propsRows.addView(propRow("Ukuran", 6));
+
+        propsBox.addView(propsTitle);
+        propsBox.addView(propsHint);
+        propsBox.addView(propsRows);
+    }
+
+    private LinearLayout propRow(String name, int start) {
+        LinearLayout r = new LinearLayout(this);
+        r.setOrientation(LinearLayout.HORIZONTAL);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.addView(label(name, 12, DIM), new LinearLayout.LayoutParams(dp(56), WRAP));
+        for (int k = 0; k < 3; k++) {
+            EditText e = makeField();
+            fields[start + k] = e;
+            r.addView(e, margin(0, WRAP, 1f, 2));
+        }
+        return r;
+    }
+
+    private EditText makeField() {
+        EditText e = new EditText(this);
+        e.setSingleLine(true);
+        e.setTextSize(13);
+        e.setTextColor(TXT);
+        e.setBackgroundColor(BG);
+        e.setPadding(dp(6), dp(6), dp(6), dp(6));
+        e.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL
+                | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        e.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        e.setOnEditorActionListener((tv, actionId, ev) -> {
+            applyProps();
+            rootView.requestFocus();
+            hideKeyboard(tv);
+            return true;
+        });
+        e.setOnFocusChangeListener((v, has) -> { if (!has) applyProps(); });
+        return e;
+    }
+
+    // ---------- helper UI ----------
+    private int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density + 0.5f); }
+
+    private LinearLayout.LayoutParams margin(int w, int h, float wt, int m) {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(w, h, wt);
+        p.setMargins(dp(m), dp(m), dp(m), dp(m));
+        return p;
+    }
+
+    private Button chip(String text, View.OnClickListener l) {
         Button b = new Button(this);
         b.setText(text);
         b.setTextSize(11);
         b.setAllCaps(false);
+        b.setTextColor(TXT);
+        b.setBackgroundColor(BTN);
         b.setMinWidth(0);
         b.setMinimumWidth(0);
-        b.setPadding(4, 0, 4, 0);
-        b.setOnClickListener(v -> gl.queueEvent(r));
-        b.setLayoutParams(new LinearLayout.LayoutParams(0,
-                LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        b.setPadding(dp(8), dp(7), dp(8), dp(7));
+        b.setOnClickListener(l);
         return b;
+    }
+
+    private TextView label(String s, int size, int color) {
+        TextView t = new TextView(this);
+        t.setText(s);
+        t.setTextSize(size);
+        t.setTextColor(color);
+        t.setPadding(dp(2), dp(4), dp(2), dp(2));
+        return t;
+    }
+
+    private void active(Button b, boolean on) { b.setBackgroundColor(on ? ACC : BTN); }
+
+    private void hideKeyboard(View v) {
+        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
+    }
+
+    // ---------- sinkronisasi dengan mesin ----------
+    private void sync() {
+        lastVer = NativeLib.version();
+        refreshOutliner();
+        refreshProps();
+        refreshModeUi();
+    }
+
+    private void pickTab(int i) {
+        if (i == tab && !collapsed) collapsed = true;
+        else { tab = i; collapsed = false; }
+        tabContent.setVisibility(collapsed ? View.GONE : View.VISIBLE);
+        outlinerScroll.setVisibility(tab == 0 ? View.VISIBLE : View.GONE);
+        propsScroll.setVisibility(tab == 1 ? View.VISIBLE : View.GONE);
+        active(tabOutliner, tab == 0 && !collapsed);
+        active(tabProps, tab == 1 && !collapsed);
+    }
+
+    private void refreshModeUi() {
+        int[] s = NativeLib.state();
+        if (s == null || s.length < 5) return;
+        active(modeObj, s[0] == 0);
+        active(modeEdit, s[0] == 1);
+        for (int i = 0; i < 4; i++) { active(toolBtns[i], s[2] == i); active(axisBtns[i], s[3] == i); }
+        active(btnVtx, s[1] == 0);
+        active(btnFace, s[1] == 1);
+        editGroup.setVisibility(s[0] == 1 ? View.VISIBLE : View.GONE);
+    }
+
+    private void refreshOutliner() {
+        outlinerList.removeAllViews();
+        int n = NativeLib.objCount(), sel = NativeLib.selected();
+        if (n == 0) {
+            outlinerList.addView(label("Kosong. Pakai menu Tambah.", 13, DIM));
+            return;
+        }
+        for (int i = 0; i < n; i++) {
+            final int idx = i;
+            final boolean vis = NativeLib.objVisible(i);
+            LinearLayout r = new LinearLayout(this);
+            r.setOrientation(LinearLayout.HORIZONTAL);
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            r.setBackgroundColor(i == sel ? ROWSEL : PANEL);
+            r.setPadding(dp(10), dp(2), dp(4), dp(2));
+
+            TextView name = label(NativeLib.objName(i), 14, vis ? TXT : DIM);
+            name.setPadding(dp(2), dp(10), dp(2), dp(10));
+            name.setOnClickListener(v -> { NativeLib.selectObj(idx); sync(); });
+            name.setOnLongClickListener(v -> { rename(idx); return true; });
+            r.addView(name, new LinearLayout.LayoutParams(0, WRAP, 1f));
+
+            TextView eye = label(vis ? "\u25C9" : "\u25CB", 18, vis ? TXT : DIM);
+            eye.setPadding(dp(12), dp(8), dp(12), dp(8));
+            eye.setOnClickListener(v -> { NativeLib.setVisible(idx, !vis); sync(); });
+            r.addView(eye, new LinearLayout.LayoutParams(WRAP, WRAP));
+
+            TextView del = label("\u2715", 16, DIM);
+            del.setPadding(dp(12), dp(8), dp(12), dp(8));
+            del.setOnClickListener(v -> { NativeLib.deleteObj(idx); sync(); });
+            r.addView(del, new LinearLayout.LayoutParams(WRAP, WRAP));
+
+            outlinerList.addView(r, new LinearLayout.LayoutParams(MATCH, WRAP));
+        }
+    }
+
+    private void refreshProps() {
+        int sel = NativeLib.selected();
+        boolean has = sel >= 0;
+        propsHint.setVisibility(has ? View.GONE : View.VISIBLE);
+        propsRows.setVisibility(has ? View.VISIBLE : View.GONE);
+        propsTitle.setVisibility(has ? View.VISIBLE : View.GONE);
+        if (!has) return;
+        for (EditText e : fields) if (e.hasFocus()) return; // jangan timpa saat user mengetik
+        propsTitle.setText(NativeLib.objName(sel));
+        float[] t = NativeLib.getTransform(sel);
+        if (t == null || t.length < 9) return;
+        for (int i = 0; i < 9; i++) {
+            String s = String.format(Locale.US, "%.2f", t[i]);
+            shown[i] = s;
+            fields[i].setText(s);
+        }
+    }
+
+    private void applyProps() {
+        int sel = NativeLib.selected();
+        if (sel < 0) return;
+        float[] t = NativeLib.getTransform(sel);
+        if (t == null || t.length < 9) return;
+        boolean changed = false;
+        for (int i = 0; i < 9; i++) {
+            String s = fields[i].getText().toString().trim();
+            if (s.equals(shown[i])) continue;
+            try {
+                t[i] = Float.parseFloat(s);
+                shown[i] = s;
+                changed = true;
+            } catch (NumberFormatException ignored) { }
+        }
+        if (changed) NativeLib.setTransform(sel, t);
+    }
+
+    private void rename(final int i) {
+        final EditText e = new EditText(this);
+        e.setText(NativeLib.objName(i));
+        e.setSelectAllOnFocus(true);
+        new AlertDialog.Builder(this)
+                .setTitle("Ganti nama")
+                .setView(e)
+                .setPositiveButton("OK", (d, w) -> { NativeLib.renameObj(i, e.getText().toString()); sync(); })
+                .setNegativeButton("Batal", null)
+                .show();
+    }
+
+    private static final int REQ_SO = 77;
+
+    private void pickSo() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        startActivityForResult(i, REQ_SO);
+    }
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if (req != REQ_SO || res != RESULT_OK || data == null || data.getData() == null) return;
+        try (InputStream in = getContentResolver().openInputStream(data.getData())) {
+            String err = NativeLib.importSo(this, in);
+            Toast.makeText(this, err == null
+                    ? "Berhasil. Tutup aplikasi (geser dari recent) lalu buka lagi."
+                    : "Ditolak: " + err, Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            Toast.makeText(this, "Gagal membaca file: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
     }
 
     private void export() {
         final String path = getExternalFilesDir(null) + "/model.obj";
         final boolean ok = NativeLib.exportObj(path);
-        runOnUiThread(() -> Toast.makeText(this,
-                ok ? "Tersimpan: " + path : "Gagal menyimpan OBJ",
-                Toast.LENGTH_LONG).show());
+        Toast.makeText(this, ok ? "Tersimpan: " + path : "Gagal menyimpan OBJ", Toast.LENGTH_LONG).show();
     }
 
-    @Override protected void onPause() { super.onPause(); gl.onPause(); }
-    @Override protected void onResume() { super.onResume(); gl.onResume(); }
+    @Override protected void onPause() {
+        super.onPause();
+        handler.removeCallbacks(poll);
+        gl.onPause();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        gl.onResume();
+        sync();
+        handler.post(poll);
+    }
 }
