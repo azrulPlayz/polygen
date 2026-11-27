@@ -65,6 +65,7 @@ public class MainActivity extends Activity {
         private int kind;
         private int color;
         private boolean active;
+        private boolean soft;
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final float density;
 
@@ -76,6 +77,7 @@ public class MainActivity extends Activity {
         }
 
         void setKind(int k) { if (k != kind) { kind = k; invalidate(); } }
+        void setSoft(boolean b) { soft = b; }
         void setActive(boolean a) { if (a != active) { active = a; invalidate(); } }
         void setIconColor(int c) { if (c != color) { color = c; invalidate(); } }
 
@@ -114,10 +116,10 @@ public class MainActivity extends Activity {
             float w = getWidth(), h = getHeight(), cx = w / 2, cy = h / 2, s = Math.min(w, h) * 0.30f;
             if (active) {
                 p.setStyle(Paint.Style.FILL);
-                p.setColor(ACC);
+                p.setColor(soft ? 0xFF6B5252 : ACC);
                 cv.drawRoundRect(new RectF(w * 0.08f, h * 0.08f, w * 0.92f, h * 0.92f), 10 * density, 10 * density, p);
             }
-            p.setColor(active ? ONACC : color);
+            p.setColor(active && !soft ? ONACC : color);
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(Math.max(2f, s * 0.16f));
             p.setStrokeCap(Paint.Cap.ROUND);
@@ -390,7 +392,7 @@ public class MainActivity extends Activity {
     private IconView btnUndo, btnRedo, btnMode, swatchHolder;
     private View swatch;
     private final IconView[] tabIcons = new IconView[5], toolIcons = new IconView[4], paintIcons = new IconView[4];
-    private final Button[] axisBtns = new Button[4];
+    private Button axisBtn;
     private Button btnVtx, btnFace;
     private UvView uvView;
     private final List<Binding> bindings = new ArrayList<>();
@@ -507,13 +509,14 @@ public class MainActivity extends Activity {
         axisGroup = new LinearLayout(this);
         axisGroup.setOrientation(LinearLayout.HORIZONTAL);
         axisGroup.setGravity(Gravity.CENTER_VERTICAL);
-        axisGroup.addView(label("Sumbu", 12, DIM));
-        String[] an = {"X", "Y", "Z", "N"};
-        for (int i = 0; i < 4; i++) {
-            final int idx = i;
-            axisBtns[i] = chip(an[i], v -> { NativeLib.set(2, idx); sync(); });
-            axisGroup.addView(axisBtns[i], margin(dp(40), WRAP, 0f, 2));
-        }
+        axisBtn = chip("Sumbu: X \u25BE", v -> {
+            PopupMenu m = new PopupMenu(this, v);
+            String[] an = {"X", "Y", "Z", "N (normal)"};
+            for (int i = 0; i < 4; i++) m.getMenu().add(0, i, i, an[i]);
+            m.setOnMenuItemClickListener(it -> { NativeLib.set(2, it.getItemId()); sync(); return true; });
+            m.show();
+        });
+        axisGroup.addView(axisBtn, margin(WRAP, WRAP, 0f, 2));
         bar2Inner.addView(axisGroup, new LinearLayout.LayoutParams(WRAP, MATCH));
 
         editGroup = new LinearLayout(this);
@@ -532,20 +535,13 @@ public class MainActivity extends Activity {
         LinearLayout common = new LinearLayout(this);
         common.setOrientation(LinearLayout.HORIZONTAL);
         common.setGravity(Gravity.CENTER_VERTICAL);
-        common.addView(dup, margin(WRAP, WRAP, 0f, 2));
-        common.addView(del, margin(WRAP, WRAP, 0f, 2));
+        common.addView(icon(I_DOTS, v -> editMenu()), new LinearLayout.LayoutParams(dp(40), dp(40)));
         common.setTag("common");
         bar2Inner.addView(common, new LinearLayout.LayoutParams(WRAP, MATCH));
 
         paintGroup = new LinearLayout(this);
         paintGroup.setOrientation(LinearLayout.HORIZONTAL);
         paintGroup.setGravity(Gravity.CENTER_VERTICAL);
-        int[] pk = {I_BRUSH, I_ERASER, I_BUCKET, I_PIPETTE};
-        for (int i = 0; i < 4; i++) {
-            final int idx = i;
-            paintIcons[i] = icon(pk[i], v -> { NativeLib.set(4, idx); sync(); });
-            paintGroup.addView(paintIcons[i], new LinearLayout.LayoutParams(dp(42), dp(40)));
-        }
         swatch = new View(this);
         swatch.setBackgroundColor(0xFFE85050);
         swatch.setOnClickListener(v -> pickBrushColor());
@@ -573,6 +569,13 @@ public class MainActivity extends Activity {
             toolIcons[i] = icon(kinds[i], v -> { NativeLib.set(1, t); sync(); });
             toolCol.addView(toolIcons[i], new LinearLayout.LayoutParams(dp(52), dp(52)));
         }
+        int[] pk = {I_BRUSH, I_ERASER, I_BUCKET, I_PIPETTE};
+        for (int i = 0; i < 4; i++) {
+            final int idx = i;
+            paintIcons[i] = icon(pk[i], v -> { NativeLib.set(4, idx); sync(); });
+            paintIcons[i].setVisibility(View.GONE);
+            toolCol.addView(paintIcons[i], new LinearLayout.LayoutParams(dp(52), dp(52)));
+        }
         return toolCol;
     }
 
@@ -588,8 +591,43 @@ public class MainActivity extends Activity {
         frame.addView(buildTexPanel(), new FrameLayout.LayoutParams(MATCH, MATCH));
         frame.addView(buildUvPanel(), new FrameLayout.LayoutParams(MATCH, MATCH));
         FrameLayout.LayoutParams fp = null;
-        bottom.addView(frame, new LinearLayout.LayoutParams(MATCH, dp(250)));
-        panelHolder = frame;
+        final int scrH = getResources().getDisplayMetrics().heightPixels;
+        panelH = Math.max(dp(150), (int) (scrH * 0.30f));
+        final LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(dp(10), 0, dp(2), 0);
+        View grip = new View(this);
+        grip.setBackgroundColor(DIM);
+        head.addView(grip, new LinearLayout.LayoutParams(dp(22), dp(4)));
+        panelTitle = label("OUTLINER", 13, DIM);
+        panelTitle.setPadding(dp(8), dp(8), dp(2), dp(8));
+        head.addView(panelTitle, new LinearLayout.LayoutParams(0, WRAP, 1f));
+        head.addView(icon(I_CLOSE, v -> { collapsed = true; applyTabs(); }), new LinearLayout.LayoutParams(dp(40), dp(36)));
+        final float[] ds = new float[2];
+        head.setOnTouchListener((v, ev) -> {  // seret judul panel untuk mengubah tinggi
+            switch (ev.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    ds[0] = ev.getRawY(); ds[1] = panelH;
+                    v.getParent().requestDisallowInterceptTouchEvent(true);
+                    return true;
+                case MotionEvent.ACTION_MOVE: {
+                    panelH = (int) Math.max(dp(110), Math.min(scrH * 0.65f, ds[1] - (ev.getRawY() - ds[0])));
+                    ViewGroup.LayoutParams lp = wrap.getLayoutParams();
+                    lp.height = panelH;
+                    wrap.setLayoutParams(lp);
+                    return true;
+                }
+                default:
+                    return true;
+            }
+        });
+        wrap.addView(head, new LinearLayout.LayoutParams(MATCH, WRAP));
+        wrap.addView(frame, new LinearLayout.LayoutParams(MATCH, 0, 1f));
+        bottom.addView(wrap, new LinearLayout.LayoutParams(MATCH, panelH));
+        panelHolder = wrap;
 
         coordBar = new LinearLayout(this);
         coordBar.setOrientation(LinearLayout.HORIZONTAL);
@@ -604,7 +642,12 @@ public class MainActivity extends Activity {
                 @Override public float get() { return transformGet(quickBase() + kk); }
                 @Override public void set(float v) { transformSet(quickBase() + kk, v); }
             }, true);
-            coordBar.addView(e, margin(0, WRAP, 1f, 2));
+            FrameLayout fl = new FrameLayout(this);
+            fl.addView(e, new FrameLayout.LayoutParams(MATCH, WRAP));
+            View mk = new View(this);
+            mk.setBackgroundColor(k == 0 ? 0xFFE84040 : k == 1 ? 0xFF50C050 : 0xFF4070F0);
+            fl.addView(mk, new FrameLayout.LayoutParams(dp(7), dp(7), Gravity.TOP | Gravity.END));
+            coordBar.addView(fl, margin(0, WRAP, 1f, 2));
         }
         bottom.addView(coordBar, new LinearLayout.LayoutParams(MATCH, WRAP));
 
@@ -615,13 +658,16 @@ public class MainActivity extends Activity {
         for (int i = 0; i < 5; i++) {
             final int idx = i;
             tabIcons[i] = icon(kinds[i], v -> pickTab(idx));
+            tabIcons[i].setSoft(true);
             tabs.addView(tabIcons[i], new LinearLayout.LayoutParams(0, dp(52), 1f));
         }
         bottom.addView(tabs, new LinearLayout.LayoutParams(MATCH, WRAP));
         return bottom;
     }
 
-    private FrameLayout panelHolder;
+    private View panelHolder;
+    private TextView panelTitle;
+    private int panelH;
 
     private View buildOutlinerPanel() {
         outlinerPanel = new LinearLayout(this);
@@ -963,6 +1009,7 @@ public class MainActivity extends Activity {
         texPanel.setVisibility(tab == TAB_TEX ? View.VISIBLE : View.GONE);
         uvPanel.setVisibility(tab == TAB_UV ? View.VISIBLE : View.GONE);
         tabIcons[0].setActive(collapsed);
+        panelTitle.setText(tab == TAB_OUT ? "OUTLINER" : tab == TAB_PROPS ? "PROPERTI" : tab == TAB_TEX ? "TEKSTUR" : "UV");
         for (int i = 1; i < 5; i++) tabIcons[i].setActive(!collapsed && tab == i);
         refreshVisiblePanel();
     }
@@ -974,7 +1021,8 @@ public class MainActivity extends Activity {
         btnUndo.setEnabled(s[5] == 1); btnUndo.setAlpha(s[5] == 1 ? 1f : 0.35f);
         btnRedo.setEnabled(s[6] == 1); btnRedo.setAlpha(s[6] == 1 ? 1f : 0.35f);
         btnMode.setKind(mode == 2 ? I_BRUSH : I_CUBE);
-        for (int i = 0; i < 4; i++) { toolIcons[i].setActive(s[2] == i); axisBtns[i].setEnabled(true); active(axisBtns[i], s[3] == i); }
+        for (int i = 0; i < 4; i++) { toolIcons[i].setActive(s[2] == i); toolIcons[i].setVisibility(mode == 2 ? View.GONE : View.VISIBLE); paintIcons[i].setVisibility(mode == 2 ? View.VISIBLE : View.GONE); }
+        axisBtn.setText("Sumbu: " + new String[]{"X", "Y", "Z", "N"}[Math.max(0, Math.min(3, s[3]))] + " \u25BE");
         active(btnVtx, s[1] == 0);
         active(btnFace, s[1] == 1);
         axisGroup.setVisibility(mode == 2 ? View.GONE : View.VISIBLE);
@@ -982,7 +1030,6 @@ public class MainActivity extends Activity {
         View common = bar2Inner.findViewWithTag("common");
         if (common != null) common.setVisibility(mode == 2 ? View.GONE : View.VISIBLE);
         paintGroup.setVisibility(mode == 2 ? View.VISIBLE : View.GONE);
-        toolCol.setVisibility(mode == 2 ? View.GONE : View.VISIBLE);
         if (s.length >= 12) {
             for (int i = 0; i < 4; i++) paintIcons[i].setActive(s[8] == i);
             swatch.setBackgroundColor(s[10]);
@@ -1346,13 +1393,16 @@ public class MainActivity extends Activity {
     }
 
     private void pickBrushColor() {
-        final int[] pal = {0xFF000000, 0xFF7F7F7F, 0xFFFFFFFF, 0xFFE85050, 0xFFF5A030, 0xFFF5E050, 0xFF60C060, 0xFF40C0C0,
-                0xFF4080F0, 0xFF8050D0, 0xFFE060B0, 0xFF8B5A2B, 0xFFB0B0B0, 0xFF404040, 0xFF9BE8A0, 0xFFA0D8FF};
+        final int[] pal = new int[32];
+        for (int c = 0; c < 8; c++) { int g = c * 255 / 7; pal[c] = 0xFF000000 | g << 16 | g << 8 | g; }
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 8; c++)
+                pal[8 + r * 8 + c] = Color.HSVToColor(new float[]{c * 45f, r == 1 ? 0.6f : 0.9f, r == 0 ? 1f : r == 1 ? 0.9f : 0.55f});
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(16), dp(8), dp(16), dp(4));
         final AlertDialog[] ref = new AlertDialog[1];
-        for (int r = 0; r < 2; r++) {
+        for (int r = 0; r < 4; r++) {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             for (int c = 0; c < 8; c++) {
