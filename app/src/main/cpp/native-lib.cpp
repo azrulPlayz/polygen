@@ -929,7 +929,7 @@ static void push(vector<float>& b, V3 p, V3 n, V3 c, float u = 0, float v = 0, f
 }
 
 struct Batch { GLuint vao = 0, vbo = 0; GLsizei n = 0; };
-static Batch bGrid, bEdge, bPts, bAxis;
+static Batch bGrid, bEdge, bPts, bAxis, bGz1, bGz2;
 static Batch bTri[MAXTEX + 1];  // 0 = tanpa tekstur, k = tekstur k-1
 static vector<GLuint> texGL;
 
@@ -956,6 +956,78 @@ static void drawB(const Batch& b, GLenum m, float lit, float pt) {
     glUniform1f(uLit, lit);
     glUniform1f(uPt, pt);
     glDrawArrays(m, 0, b.n);
+}
+
+
+// ---------- gizmo panah/cincin ----------
+static bool gizmoOn(V3& c) {
+    return tool >= 1 && (mode == 0 || (mode == 1 && tool == 1)) && selCenter(c);
+}
+static void gizmoBasis(int a, V3& d, V3& s, V3& t) {
+    V3 ax[3] = {{1.f, 0.f, 0.f}, {0.f, 1.f, 0.f}, {0.f, 0.f, 1.f}};
+    d = ax[a];
+    V3 u = a == 1 ? V3{1.f, 0.f, 0.f} : V3{0.f, 1.f, 0.f};
+    s = norm(cross(d, u));
+    t = cross(d, s);
+}
+static V3 gizmoPoint(V3 c, int a, float L) {
+    V3 d, s, t;
+    gizmoBasis(a, d, s, t);
+    if (tool == 3) return c + (s * 0.7071f + t * 0.7071f) * L;
+    return c + d * (L * 1.05f);
+}
+static int gizmoPick(float x, float y) {
+    V3 c;
+    if (!gizmoOn(c)) return -1;
+    float L = camDist * 0.16f, best = std::max(56.f, 0.05f * (float)H);
+    int bi = -1;
+    for (int a = 0; a < 3; a++) {
+        float sx, sy;
+        if (!toScreen(gizmoPoint(c, a, L), sx, sy)) continue;
+        float d = hypotf(sx - x, sy - y);
+        if (d < best) { best = d; bi = a; }
+    }
+    return bi;
+}
+static void drawGizmo() {
+    vector<float> ln, tr;
+    V3 c;
+    if (gizmoOn(c)) {
+        float L = camDist * 0.16f;
+        V3 up{0.f, 1.f, 0.f};
+        V3 cols[3] = {{1.f, 0.3f, 0.3f}, {0.4f, 0.9f, 0.4f}, {0.3f, 0.5f, 1.f}};
+        for (int a = 0; a < 3; a++) {
+            V3 d, s, t;
+            gizmoBasis(a, d, s, t);
+            V3 col = cols[a];
+            if (tool == 3) {
+                const int N = 40;
+                for (int i = 0; i < N; i++) {
+                    float a0 = i * 6.2831853f / N, a1 = (i + 1) * 6.2831853f / N;
+                    push(ln, c + (s * cosf(a0) + t * sinf(a0)) * L, up, col);
+                    push(ln, c + (s * cosf(a1) + t * sinf(a1)) * L, up, col);
+                }
+            } else {
+                V3 base = c + d * (L * 0.8f), tip = c + d * (L * 1.15f);
+                push(ln, c, up, col);
+                push(ln, base, up, col);
+                const int N = 10;
+                float r = L * 0.07f;
+                for (int i = 0; i < N; i++) {
+                    float a0 = i * 6.2831853f / N, a1 = (i + 1) * 6.2831853f / N;
+                    V3 p0 = base + (s * cosf(a0) + t * sinf(a0)) * r, p1 = base + (s * cosf(a1) + t * sinf(a1)) * r;
+                    push(tr, p0, d, col);
+                    push(tr, p1, d, col);
+                    push(tr, tip, d, col);
+                }
+            }
+        }
+    }
+    upload(bGz1, ln);
+    upload(bGz2, tr);
+    glLineWidth(3.f);
+    drawB(bGz1, GL_LINES, 0.f, 1.f);
+    drawB(bGz2, GL_TRIANGLES, 0.f, 1.f);
 }
 
 static const char* VS = R"(#version 300 es
@@ -1101,7 +1173,7 @@ extern "C" {
 JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_init(JNIEnv*, jclass) {
     std::lock_guard<std::mutex> lk(M);
     // konteks GL baru (mis. setelah onResume): semua objek GL lama sudah hilang
-    bGrid = bEdge = bPts = bAxis = Batch();
+    bGrid = bEdge = bPts = bAxis = bGz1 = bGz2 = Batch();
     for (auto& b : bTri) b = Batch();
     texGL.clear();
     for (Tex& t : texs) t.dirty = true;
@@ -1170,6 +1242,7 @@ JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_draw(JNIEnv*, jclass) {
     drawB(bPts, GL_POINTS, 0.f, 14.f);
     glLineWidth(3.f);
     drawB(bAxis, GL_LINES, 0.f, 1.f);
+    drawGizmo();
     glBindVertexArray(0);
 }
 
@@ -1177,11 +1250,16 @@ JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_touch(JNIEnv*, jclass, ji
         jfloat x, jfloat y, jfloat x2, jfloat y2, jint n) {
     std::lock_guard<std::mutex> lk(M);
     static float lx, ly, sx, sy, pd, pmx, pmy;
-    static bool moved, multi;
+    static bool moved, multi, onGizmo;
     switch (act) {
         case 0:
             lx = sx = x; ly = sy = y; moved = false; multi = false;
             dragPushed = false; strokeFirst = true; lastTex = -1;
+            onGizmo = false;
+            if (mode != 2 && n < 2) {
+                int g = gizmoPick(x, y);
+                if (g >= 0) { onGizmo = true; if (g != axisI) { axisI = g; bump(); } }
+            }
             break;
         case 5:
             pd = hypotf(x2 - x, y2 - y);
@@ -1219,7 +1297,7 @@ JNIEXPORT void JNICALL Java_com_mini_polygen_NativeLib_touch(JNIEnv*, jclass, ji
         case 1:
             dragPushed = false; lastTex = -1;
             if (mode == 2) { if (!multi && strokeFirst) paintAt(x, y, true); }
-            else if (!moved) { if (mode == 0) pickObject(x, y); else pickElement(x, y); }
+            else if (!moved && !onGizmo) { if (mode == 0) pickObject(x, y); else pickElement(x, y); }
             strokeFirst = true;
             break;
         default: break;
