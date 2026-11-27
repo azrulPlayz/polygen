@@ -14,26 +14,30 @@ import java.io.OutputStream;
 /** Jembatan JNI ke mesin modelling C++ (native-lib.cpp). Semua fungsi aman dipanggil dari thread mana pun. */
 public final class NativeLib {
     /** Harus sama dengan POLYGEN_API_TAG di native-lib.cpp. Naikkan kalau daftar fungsi native berubah. */
-    public static final String API_TAG = "POLYGEN_API_1";
+    public static final String API_TAG = "POLYGEN_API_2";
     private static boolean loaded = false;
     private static boolean fromOverride = false;
 
     private static File overrideFile(Context c) { return new File(c.getFilesDir(), "libpolygen_override.so"); }
 
-    /** Panggil sekali di awal (sebelum fungsi native mana pun). Pakai .so pengganti kalau ada, kalau tidak yang bawaan APK. */
+    /** Panggil sekali di awal (sebelum fungsi native mana pun). Pakai .so pengganti kalau ada dan cocok, kalau tidak yang bawaan APK. */
     public static synchronized void load(Context ctx) {
         if (loaded) return;
         File o = overrideFile(ctx);
         if (o.exists()) {
             try {
-                System.load(o.getAbsolutePath());
-                fromOverride = true;
-                loaded = true;
-                return;
+                // .so pengganti lama (API lain) akan membuat aplikasi crash saat fungsi baru dipanggil: cek dulu
+                if (verify(o) == null) {
+                    System.load(o.getAbsolutePath());
+                    fromOverride = true;
+                    loaded = true;
+                    return;
+                }
             } catch (Throwable t) {
-                o.setWritable(true);
-                o.delete();  // rusak: buang, pakai bawaan
+                // jatuh ke bawah: buang
             }
+            o.setWritable(true);
+            o.delete();  // rusak / versi lama: buang, pakai bawaan
         }
         System.loadLibrary("polygen");
         loaded = true;
@@ -106,7 +110,9 @@ public final class NativeLib {
 
     // status
     public static native int version();      // naik setiap ada perubahan
-    public static native int[] state();      // {mode, selMode, tool, axis, selected, canUndo, canRedo, canPaste}
+    /** {mode(0 objek,1 edit,2 paint), selMode, tool, axis, selected, canUndo, canRedo, canPaste,
+     *   paintTool(0 kuas,1 hapus,2 isi,3 pipet), brushSize, brushColorARGB, activeTex} */
+    public static native int[] state();
 
     // objek
     public static native int objCount();
@@ -122,13 +128,48 @@ public final class NativeLib {
     public static native void setTransform(int i, float[] t);
     /** type: 0 kubus, 1 bidang */
     public static native void addObj(int type);
+    /** shape: 0 kubus, 1 kubus bevel, 2 piramida, 3 bidang, 4 lingkaran, 5 silinder, 6 tabung, 7 kerucut,
+     *  8 bola, 9 ikosfer, 10 oktahedron, 11 dodekahedron, 12 torus */
+    public static native void addMesh(int shape, float diameter, float height);
 
     // alat
     /** kind: 0 seleksi edit (0 vertex, 1 face), 1 tool (0 kamera, 1 geser, 2 ukuran, 3 putar),
-     *  2 sumbu (0 X, 1 Y, 2 Z, 3 N), 3 mode (0 objek, 1 edit) */
+     *  2 sumbu (0 X, 1 Y, 2 Z, 3 N), 3 mode (0 objek, 1 edit, 2 paint),
+     *  4 alat paint (0 kuas, 1 hapus, 2 isi, 3 pipet), 5 ukuran kuas (px), 6 warna kuas (ARGB), 7 tekstur aktif */
     public static native void set(int kind, int value);
     /** code: 0 extrude, 1 hapus pilihan, 2 undo, 3 redo, 4 duplikat, 5 salin, 6 tempel,
-     *  7 mulai gestur edit baru (gabung undo), 10..17 warna objek (0 abu bawaan) */
+     *  7 mulai gestur edit baru (gabung undo), 10..17 warna objek (0 abu bawaan), 20 reset kamera */
     public static native void action(int code);
     public static native boolean exportObj(String path);
+
+    // grup
+    public static native int groupCount();
+    public static native String groupName(int g);
+    /** {visible, collapsed} */
+    public static native int[] groupInfo(int g);
+    public static native int objGroup(int i);
+    /** op: 0 grup baru, 1 toggle tampil grup a, 2 toggle lipat grup a, 3 pindah objek a ke grup b (-1 = root),
+     *  4 hapus grup a (isi ke root), 5 hapus grup a beserta isi, 6 grupkan objek a ke grup baru. Mengembalikan indeks grup baru atau -1 */
+    public static native int groupOp(int op, int a, int b);
+    public static native void renameGroup(int g, String name);
+
+    // tekstur & UV
+    public static native int texCount();
+    public static native String texName(int i);
+    /** {lebar, tinggi} */
+    public static native int[] texInfo(int i);
+    /** piksel ARGB, baris atas dulu */
+    public static native int[] texPixels(int i);
+    /** Mengembalikan indeks tekstur baru, atau -1 (penuh / ukuran tidak valid, maksimal 8 tekstur dan 512x512) */
+    public static native int texCreate(String name, int w, int h, int argb);
+    public static native int texSet(String name, int w, int h, int[] argb);
+    public static native void texDelete(int i);
+    public static native int objTex(int i);
+    public static native void setObjTex(int i, int t);
+    public static native int faceCount(int obj);
+    public static native String faceName(int obj, int face);
+    /** {u0, v0, u1, v1} dalam 0..1 */
+    public static native float[] getFaceUV(int obj, int face);
+    public static native void setFaceUV(int obj, int face, float[] uv);
+    public static native void autoUV(int obj);
 }
